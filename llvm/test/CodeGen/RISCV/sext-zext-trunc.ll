@@ -930,3 +930,62 @@ bb2:
   ret void
 }
 declare void @bar_i16(i16);
+
+; Retain the nneg information when legalizing an arithmetic result, too.
+; The extension constrains only the narrow result, not the input registers.
+define i64 @add_i16_zext_nneg(i64 %x, i64 %y) {
+; RV32I-LABEL: add_i16_zext_nneg:
+; RV32I:       # %bb.0:
+; RV32I-NEXT:    add a0, a0, a2
+; RV32I-NEXT:    slli a0, a0, 16
+; RV32I-NEXT:    srli a0, a0, 16
+; RV32I-NEXT:    li a1, 0
+; RV32I-NEXT:    ret
+;
+; RV64I-LABEL: add_i16_zext_nneg:
+; RV64I:       # %bb.0:
+; RV64I-NEXT:    add a0, a0, a1
+; RV64I-NEXT:    slli a0, a0, 48
+; RV64I-NEXT:    srli a0, a0, 48
+; RV64I-NEXT:    ret
+;
+; RV64ZBB-LABEL: add_i16_zext_nneg:
+; RV64ZBB:       # %bb.0:
+; RV64ZBB-NEXT:    add a0, a0, a1
+; RV64ZBB-NEXT:    zext.h a0, a0
+; RV64ZBB-NEXT:    ret
+  %a = trunc i64 %x to i16
+  %b = trunc i64 %y to i16
+  %sum = add i16 %a, %b
+  %wide = zext nneg i16 %sum to i64
+  ret i64 %wide
+}
+
+; Without nneg, bit 15 may be set and zero extension must be retained.
+define i64 @add_i16_zext(i64 %x, i64 %y) {
+; RV32I-LABEL: add_i16_zext:
+; RV32I:       # %bb.0:
+; RV32I-NEXT:    add a0, a0, a2
+; RV32I-NEXT:    slli a0, a0, 16
+; RV32I-NEXT:    srli a0, a0, 16
+; RV32I-NEXT:    li a1, 0
+; RV32I-NEXT:    ret
+;
+; RV64I-LABEL: add_i16_zext:
+; RV64I:       # %bb.0:
+; RV64I-NEXT:    add a0, a0, a1
+; RV64I-NEXT:    slli a0, a0, 48
+; RV64I-NEXT:    srli a0, a0, 48
+; RV64I-NEXT:    ret
+;
+; RV64ZBB-LABEL: add_i16_zext:
+; RV64ZBB:       # %bb.0:
+; RV64ZBB-NEXT:    add a0, a0, a1
+; RV64ZBB-NEXT:    zext.h a0, a0
+; RV64ZBB-NEXT:    ret
+  %a = trunc i64 %x to i16
+  %b = trunc i64 %y to i16
+  %sum = add i16 %a, %b
+  %wide = zext i16 %sum to i64
+  ret i64 %wide
+}

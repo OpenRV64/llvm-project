@@ -1786,6 +1786,9 @@ SDValue SelectionDAGBuilder::getCopyFromRegs(const Value *V, Type *Ty) {
     RegsForValue RFV(*DAG.getContext(), DAG.getTargetLoweringInfo(),
                      DAG.getDataLayout(), InReg, Ty,
                      std::nullopt); // This is not an ABI copy.
+    if (auto Ext = FuncInfo.PHIExportPreferences.find(V);
+        Ext != FuncInfo.PHIExportPreferences.end())
+      RFV.RegVTs[0] = Ext->second.RegisterVT;
     SDValue Chain = DAG.getEntryNode();
     Result = RFV.getCopyFromRegs(DAG, FuncInfo, getCurSDLoc(), Chain, nullptr,
                                  V);
@@ -11820,6 +11823,16 @@ void SelectionDAGBuilder::CopyValueToVirtualRegister(const Value *V,
   RegsForValue RFV(V->getContext(), TLI, DAG.getDataLayout(), Reg, V->getType(),
                    std::nullopt); // This is not an ABI copy.
   SDValue Chain = DAG.getEntryNode();
+
+  // Commit accepted PHI export preferences with a real DAG extension. Widen
+  // before splitting into register parts: target splitting hooks need not
+  // honor the ordinary (non-binding) preferred extension argument.
+  if (auto Ext = FuncInfo.PHIExportPreferences.find(V);
+      Ext != FuncInfo.PHIExportPreferences.end()) {
+    RFV.RegVTs[0] = Ext->second.RegisterVT;
+    Op = DAG.getNode(Ext->second.ExtendType, getCurSDLoc(),
+                     Ext->second.RegisterVT, Op);
+  }
 
   if (ExtendType == ISD::ANY_EXTEND) {
     auto PreferredExtendIt = FuncInfo.PreferredExtendType.find(V);

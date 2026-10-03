@@ -58,28 +58,64 @@ static bool isUsedOutsideOfDefiningBlock(const Instruction *I) {
 }
 
 static ISD::NodeType getPreferredExtendForValue(const Instruction *I) {
-  // For the users of the source value being used for compare instruction, if
-  // the number of signed predicate is greater than unsigned predicate, we
-  // prefer to use SIGN_EXTEND.
+  // Prefer SIGN_EXTEND when more consumers use a signed representation.
+  // For scalar loads, include extensions and GEP indices before the export
+  // code falls back to a supposedly free zero-extension of the load.
   //
   // With this optimization, we would be able to reduce some redundant sign or
   // zero extension instruction, and eventually more machine CSE opportunities
   // can be exposed.
   ISD::NodeType ExtendKind = ISD::ANY_EXTEND;
   unsigned NumOfSigned = 0, NumOfUnsigned = 0;
-  for (const Use &U : I->uses()) {
-    if (const auto *CI = dyn_cast<CmpInst>(U.getUser())) {
-      NumOfSigned += CI->isSigned();
-      NumOfUnsigned += CI->isUnsigned();
-    }
-    if (const auto *CallI = dyn_cast<CallBase>(U.getUser())) {
-      if (!CallI->isArgOperand(&U))
+  bool IsIntegerLoad = isa<LoadInst>(I) && I->getType()->isIntegerTy();
+  // Follow PHI users of loads, including loop-carried PHIs. This is only an
+  // export preference: consumers must still prove any upper-bit facts from
+  // the selected producers. Visit each PHI once to avoid cycles and counting
+  // a shared consumer multiple times.
+  SmallVector<const Instruction *, 8> Worklist{I};
+  SmallPtrSet<const Instruction *, 8> Seen{I};
+  while (!Worklist.empty()) {
+    const Instruction *V = Worklist.pop_back_val();
+    for (const Use &U : V->uses()) {
+      if (IsIntegerLoad && isa<PHINode>(U.getUser())) {
+        const auto *PN = cast<PHINode>(U.getUser());
+        if (Seen.insert(PN).second) {
+          if (Seen.size() > 32)
+            return ISD::ANY_EXTEND;
+          Worklist.push_back(PN);
+        }
         continue;
-      unsigned ArgNo = CallI->getArgOperandNo(&U);
-      NumOfUnsigned += CallI->paramHasAttr(ArgNo, Attribute::ZExt);
-      NumOfSigned += CallI->paramHasAttr(ArgNo, Attribute::SExt);
+      }
+      if (IsIntegerLoad) {
+        if (isa<SExtInst>(U.getUser()))
+          ++NumOfSigned;
+        if (const auto *ZI = dyn_cast<ZExtInst>(U.getUser())) {
+          NumOfSigned += ZI->hasNonNeg();
+          NumOfUnsigned += !ZI->hasNonNeg();
+        }
+        if (const auto *GEP = dyn_cast<GetElementPtrInst>(U.getUser())) {
+          // GEP sign-extends indices narrower than the pointer index type.
+          // Pointer operands and indices that are truncated need no extension.
+          if (U.getOperandNo() != 0 &&
+              I->getType()->getIntegerBitWidth() <
+                  GEP->getDataLayout().getIndexTypeSizeInBits(GEP->getType()))
+            ++NumOfSigned;
+        }
+      }
+      if (const auto *CI = dyn_cast<CmpInst>(U.getUser())) {
+        NumOfSigned += CI->isSigned();
+        NumOfUnsigned += CI->isUnsigned();
+      }
+      if (const auto *CallI = dyn_cast<CallBase>(U.getUser())) {
+        if (!CallI->isArgOperand(&U))
+          continue;
+        unsigned ArgNo = CallI->getArgOperandNo(&U);
+        NumOfUnsigned += CallI->paramHasAttr(ArgNo, Attribute::ZExt);
+        NumOfSigned += CallI->paramHasAttr(ArgNo, Attribute::SExt);
+      }
     }
   }
+
   if (NumOfSigned > NumOfUnsigned)
     ExtendKind = ISD::SIGN_EXTEND;
 
@@ -132,6 +168,11 @@ void FunctionLoweringInfo::set(const Function &fn, MachineFunction &mf,
       }
     }
   }
+
+  if (DAG->getOptLevel() != CodeGenOptLevel::None &&
+      !MF->getTarget().Options.EnableFastISel &&
+      !MF->getTarget().Options.EnableGlobalISel)
+    computePHIExtensionPreferences(*Fn, *TLI, PHIExportPreferences);
 
   // Initialize the mapping of values to registers.  This is only set up for
   // instruction values that are used outside of the block that defines
@@ -359,6 +400,7 @@ void FunctionLoweringInfo::clear() {
   StatepointStackSlots.clear();
   StatepointRelocationMaps.clear();
   PreferredExtendType.clear();
+  PHIExportPreferences.clear();
   PreprocessedDVRDeclares.clear();
 }
 
@@ -392,6 +434,10 @@ Register FunctionLoweringInfo::CreateRegs(Type *Ty, bool isDivergent) {
 }
 
 Register FunctionLoweringInfo::CreateRegs(const Value *V) {
+  if (auto It = PHIExportPreferences.find(V); It != PHIExportPreferences.end())
+    return CreateReg(It->second.RegisterVT,
+                     UA && UA->isDivergentAtDef(V) &&
+                         !TLI->requiresUniformRegister(*MF, V));
   return CreateRegs(V->getType(), UA && UA->isDivergentAtDef(V) &&
                                       !TLI->requiresUniformRegister(*MF, V));
 }
@@ -460,6 +506,27 @@ void FunctionLoweringInfo::ComputePHILiveOutRegInfo(const PHINode *PN,
   if (!BaseReg)
     return;
   assert(BaseReg.isVirtual() && "Expected a virtual reg");
+
+  // These facts follow from explicit extending load exports, not from a
+  // consumer's desired extension or a prediction of instruction selection.
+  // Every input is either such an export, a compatible constant, or another
+  // PHI in the same group, so the representation also holds on backedges.
+  if (auto Ext = PHIExportPreferences.find(PN);
+      Ext != PHIExportPreferences.end()) {
+    assert(NumRegisters == 1 && "PHI export requires a single register");
+    unsigned SrcBits = Ty->getIntegerBitWidth();
+    BitWidth = Ext->second.RegisterVT.getSizeInBits();
+    LiveOutRegInfo.grow(BaseReg);
+    LiveOutInfo &Info = LiveOutRegInfo[BaseReg];
+    Info.IsValid = true;
+    Info.Known = KnownBits(BitWidth);
+    Info.NumSignBits = BitWidth - SrcBits;
+    if (Ext->second.ExtendType == ISD::SIGN_EXTEND)
+      ++Info.NumSignBits;
+    else
+      Info.Known.Zero.setBitsFrom(SrcBits);
+    return;
+  }
 
   SmallVector<const Value *, 8> IncomingValues;
   if (AllPredsVisited) {

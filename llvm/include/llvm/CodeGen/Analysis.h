@@ -16,6 +16,7 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/CodeGen/ISDOpcodes.h"
+#include "llvm/CodeGenTypes/MachineValueType.h"
 #include "llvm/IR/Instructions.h"
 
 namespace llvm {
@@ -28,6 +29,19 @@ class TargetLoweringBase;
 class TargetLowering;
 class TargetMachine;
 struct EVT;
+
+struct PHIExtensionPreference {
+  ISD::NodeType ExtendType = ISD::ANY_EXTEND;
+  MVT RegisterVT = MVT::Other;
+};
+
+/// Choose optional common export representations for narrow load/PHI groups.
+/// Reject groups with conflicting consumers or without legal extending loads.
+/// These are preferences, not known-bit facts: clients must explicitly extend
+/// the exports before relying on the representation at PHI consumers.
+LLVM_ABI void computePHIExtensionPreferences(
+    const Function &F, const TargetLowering &TLI,
+    DenseMap<const Value *, PHIExtensionPreference> &Preferences);
 
 /// Compute the linearized index of a member in a nested
 /// aggregate/struct/array.

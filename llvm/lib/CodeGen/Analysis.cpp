@@ -11,6 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/CodeGen/Analysis.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/TargetInstrInfo.h"
@@ -26,6 +27,116 @@
 #include "llvm/Target/TargetMachine.h"
 
 using namespace llvm;
+
+void llvm::computePHIExtensionPreferences(
+    const Function &F, const TargetLowering &TLI,
+    DenseMap<const Value *, PHIExtensionPreference> &Preferences) {
+  const DataLayout &DL = F.getDataLayout();
+  SmallPtrSet<const Value *, 32> Visited;
+  for (const BasicBlock &BB : F) {
+    for (const PHINode &Root : BB.phis()) {
+      if (Visited.contains(&Root) || Root.use_empty() ||
+          !Root.getType()->isIntegerTy())
+        continue;
+      EVT VT = TLI.getValueType(DL, Root.getType());
+      MVT RegVT = TLI.getRegisterType(F.getContext(), VT);
+      MVT DefaultRegVT = RegVT;
+      if (!RegVT.isInteger() || !VT.isSimple() || VT.getSizeInBits() <= 1 ||
+          VT.getSizeInBits() > RegVT.getSizeInBits() ||
+          TLI.getNumRegisters(F.getContext(), VT) != 1)
+        continue;
+
+      // Include PHI users as well as operands. Shared loads must not receive
+      // incompatible export representations from independently planned PHIs.
+      SmallVector<const Value *, 8> Worklist{&Root};
+      SmallPtrSet<const Value *, 32> Group;
+      SmallVector<const LoadInst *, 8> Loads;
+      SmallVector<const ConstantInt *, 4> Constants;
+      bool Supported = true, Signed = false, Unsigned = false;
+      bool NonNeg = false, HasPHIConsumer = false;
+      while (!Worklist.empty()) {
+        const Value *V = Worklist.pop_back_val();
+        if (!Group.insert(V).second)
+          continue;
+        if (Group.size() > 32) {
+          Supported = false;
+          break;
+        }
+        if (const auto *CI = dyn_cast<ConstantInt>(V)) {
+          Constants.push_back(CI);
+          continue;
+        }
+        if (const auto *PN = dyn_cast<PHINode>(V)) {
+          append_range(Worklist, PN->incoming_values());
+        } else if (const auto *LI = dyn_cast<LoadInst>(V);
+                   LI && LI->isSimple()) {
+          Loads.push_back(LI);
+        } else {
+          Supported = false;
+          break;
+        }
+        for (const User *U : V->users()) {
+          if (isa<SExtInst>(U) || isa<ZExtInst>(U)) {
+            EVT DstVT = TLI.getValueType(DL, U->getType());
+            if (DstVT.isSimple() && TLI.isTypeLegal(DstVT) &&
+                DstVT.getSizeInBits() > RegVT.getSizeInBits())
+              RegVT = DstVT.getSimpleVT();
+          }
+          if (const auto *PN = dyn_cast<PHINode>(U)) {
+            Worklist.push_back(PN);
+          } else if (isa<SExtInst>(U)) {
+            Signed = true;
+            HasPHIConsumer |= isa<PHINode>(V);
+          } else if (const auto *ZI = dyn_cast<ZExtInst>(U)) {
+            HasPHIConsumer |= isa<PHINode>(V);
+            if (ZI->hasNonNeg()) {
+              NonNeg = true;
+            } else {
+              Unsigned = true;
+            }
+          }
+        }
+      }
+      Visited.insert_range(Group);
+      if (!Supported || Loads.empty() || !HasPHIConsumer ||
+          VT.getSizeInBits() >= RegVT.getSizeInBits() || (Signed && Unsigned))
+        continue;
+      ISD::NodeType Ext =
+          Signed || (NonNeg && !Unsigned) ? ISD::SIGN_EXTEND : ISD::ZERO_EXTEND;
+      // Keep target-preferred narrow arithmetic representations. A zero-extend
+      // at one consumer need not change all of the incoming values.
+      if (Ext == ISD::ZERO_EXTEND && TLI.isSExtCheaperThanZExt(VT, RegVT))
+        continue;
+      // Constants currently share an export register keyed by their IR value.
+      // Keep their default register width rather than mix export layouts.
+      if (!Constants.empty() && RegVT != DefaultRegVT)
+        continue;
+      unsigned LoadExt =
+          Ext == ISD::SIGN_EXTEND ? ISD::SEXTLOAD : ISD::ZEXTLOAD;
+      if (llvm::any_of(Loads, [&](const LoadInst *LI) {
+            unsigned Fast = 0;
+            return !TLI.isLoadLegal(RegVT, VT, LI->getAlign(),
+                                    LI->getPointerAddressSpace(), LoadExt,
+                                    false) ||
+                   !TLI.allowsMemoryAccess(
+                       F.getContext(), DL, VT, LI->getPointerAddressSpace(),
+                       LI->getAlign(), MachineMemOperand::MOLoad, &Fast) ||
+                   !Fast;
+          }))
+        continue;
+      // Constants use the target's existing export policy and may be shared
+      // with other PHIs. Do not promise a different representation for them.
+      if (llvm::any_of(Constants, [&](const ConstantInt *CI) {
+            return CI->isNegative() &&
+                   TLI.signExtendConstant(CI) != (Ext == ISD::SIGN_EXTEND);
+          }))
+        continue;
+      for (const Value *V : Group)
+        if (!isa<ConstantInt>(V))
+          Preferences[V] = {Ext, RegVT};
+    }
+  }
+}
 
 /// Compute the linearized index of a member in a nested aggregate/struct/array
 /// by recursing and accumulating CurIndex as long as there are indices in the

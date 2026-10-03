@@ -20,6 +20,7 @@
 #include "llvm/ADT/IndexedMap.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/CodeGen/Analysis.h"
 #include "llvm/CodeGen/ISDOpcodes.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/TargetRegisterInfo.h"
@@ -197,6 +198,11 @@ public:
   /// for a value.
   DenseMap<const Value *, ISD::NodeType> PreferredExtendType;
 
+  /// Accepted PHI-group preferences. Unlike PreferredExtendType, these are
+  /// materialized explicitly at every load export by SelectionDAGBuilder.
+  /// PHI facts may rely on that common representation, even around a loop.
+  DenseMap<const Value *, PHIExtensionPreference> PHIExportPreferences;
+
   /// The set of basic blocks visited thus far by instruction selection. Indexed
   /// by basic block number.
   SmallVector<bool> VisitedBBs;
@@ -268,8 +274,8 @@ public:
   /// GetLiveOutRegInfo - Gets LiveOutInfo for a register, returning NULL if the
   /// register is a PHI destination and the PHI's LiveOutInfo is not valid. If
   /// the register's LiveOutInfo is for a smaller bit width, it is extended to
-  /// the larger bit width by zero extension. The bit width must be no smaller
-  /// than the LiveOutInfo's existing bit width.
+  /// the larger bit width with unknown upper bits. The bit width must be no
+  /// smaller than the LiveOutInfo's existing bit width.
   LLVM_ABI const LiveOutInfo *GetLiveOutRegInfo(Register Reg,
                                                 unsigned BitWidth);
 

@@ -16,10 +16,14 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/CodeGen/TypePromotion.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SetVector.h"
+#include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/TargetTransformInfo.h"
+#include "llvm/CodeGen/Analysis.h"
 #include "llvm/CodeGen/Passes.h"
 #include "llvm/CodeGen/TargetLowering.h"
 #include "llvm/CodeGen/TargetPassConfig.h"
@@ -143,6 +147,7 @@ class TypePromotionImpl {
   SmallPtrSet<Instruction *, 8> SafeToPromote;
   SmallPtrSet<Instruction *, 4> SafeWrap;
   SmallPtrSet<Instruction *, 4> InstsToRemove;
+  SmallPtrSet<const Value *, 16> DeferredToSelectionDAG;
 
   // Does V have the same size result type as TypeSize.
   bool EqualTypeSize(Value *V);
@@ -799,6 +804,11 @@ bool TypePromotionImpl::isSupportedValue(Value *V) {
 /// smaller than the targeted promoted type. Check that we're not trying to
 /// promote something larger than our base 'TypeSize' type.
 bool TypePromotionImpl::isLegalToPromote(Value *V) {
+  // Preserve the entire PHI group, including when a different user triggers
+  // this search. Keep extensions at their uses for SelectionDAG to lower.
+  if (DeferredToSelectionDAG.contains(V))
+    return false;
+
   auto *I = dyn_cast<Instruction>(V);
   if (!I)
     return true;
@@ -814,8 +824,16 @@ bool TypePromotionImpl::isLegalToPromote(Value *V) {
 }
 
 bool TypePromotionImpl::TryToPromote(Value *V, unsigned PromotedWidth,
-                                 const LoopInfo &LI) {
+                                     const LoopInfo &LI) {
   Type *OrigTy = V->getType();
+  // All entry points, including the PHI/zext search, must respect the target's
+  // preference for narrow arithmetic. RV64 i32 operations need not carry a
+  // zero-extended i64 representation just because one consumer requires it.
+  EVT SrcVT = EVT::getIntegerVT(*Ctx, OrigTy->getIntegerBitWidth());
+  EVT DstVT = EVT::getIntegerVT(*Ctx, PromotedWidth);
+  if (TLI->isSExtCheaperThanZExt(SrcVT, DstVT))
+    return false;
+
   TypeSize = OrigTy->getPrimitiveSizeInBits().getFixedValue();
   SafeToPromote.clear();
   SafeWrap.clear();
@@ -962,6 +980,14 @@ bool TypePromotionImpl::run(Function &F, const TargetMachine *TM,
   const DataLayout &DL = F.getDataLayout();
   const TargetSubtargetInfo *SubtargetInfo = TM->getSubtargetImpl(F);
   TLI = SubtargetInfo->getTargetLowering();
+  DeferredToSelectionDAG.clear();
+  if (!TM->Options.EnableFastISel && !TM->Options.EnableGlobalISel) {
+    DenseMap<const Value *, PHIExtensionPreference> Preferences;
+    computePHIExtensionPreferences(F, *TLI, Preferences);
+    for (const auto &[V, Ext] : Preferences)
+      if (isa<PHINode>(V))
+        DeferredToSelectionDAG.insert(V);
+  }
   RegisterBitWidth =
       TTI.getRegisterBitWidth(TargetTransformInfo::RGK_Scalar).getFixedValue();
   Ctx = &F.getContext();

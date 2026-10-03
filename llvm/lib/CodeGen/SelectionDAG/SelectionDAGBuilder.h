@@ -774,9 +774,9 @@ struct RegsForValue {
   /// registers are. (Individual values are never synthesized from more than one
   /// type of register.)
   ///
-  /// With virtual registers, the contents of RegVTs is redundant with TLI's
-  /// getRegisterType member function, however when with physical registers
-  /// it is necessary to have a separate record of the types.
+  /// Virtual registers normally use TLI's getRegisterType. A PHI export
+  /// preference can select a wider legal register type; physical registers
+  /// also need a separate record of their types.
   SmallVector<MVT, 4> RegVTs;
 
   /// This list holds the registers assigned to the values.

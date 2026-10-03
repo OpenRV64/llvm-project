@@ -6,18 +6,17 @@ define dso_local void @foo(ptr noundef %ptr0, ptr nocapture noundef readonly %pt
 ; CHECK-LABEL: @foo(
 ; CHECK-NEXT:  entry:
 ; CHECK-NEXT:    [[TMP0:%.*]] = load i8, ptr [[PTR0:%.*]], align 1
-; CHECK-NEXT:    [[TMP1:%.*]] = zext i8 [[TMP0]] to i32
 ; CHECK-NEXT:    br label [[DO_BODY:%.*]]
 ; CHECK:       do.body:
-; CHECK-NEXT:    [[TO_PROMOTE:%.*]] = phi i32 [ [[TMP1]], [[ENTRY:%.*]] ], [ [[TMP4:%.*]], [[DO_BODY]] ]
+; CHECK-NEXT:    [[TO_PROMOTE1:%.*]] = phi i8 [ [[TMP0]], [[ENTRY:%.*]] ], [ [[COND_I:%.*]], [[DO_BODY]] ]
+; CHECK-NEXT:    [[TO_PROMOTE:%.*]] = zext i8 [[TO_PROMOTE1]] to i32
 ; CHECK-NEXT:    [[ARRAYIDX1:%.*]] = getelementptr inbounds i8, ptr [[PTR1:%.*]], i32 [[TO_PROMOTE]]
 ; CHECK-NEXT:    [[TMP2:%.*]] = load i8, ptr [[ARRAYIDX1]], align 2
 ; CHECK-NEXT:    [[TMP3:%.*]] = zext i8 [[TMP2]] to i32
 ; CHECK-NEXT:    [[COND_IN_I:%.*]] = getelementptr inbounds i8, ptr [[PTR1]], i32 [[TMP3]]
-; CHECK-NEXT:    [[COND_I:%.*]] = load i8, ptr [[COND_IN_I]], align 1
-; CHECK-NEXT:    [[TMP4]] = zext i8 [[COND_I]] to i32
+; CHECK-NEXT:    [[COND_I]] = load i8, ptr [[COND_IN_I]], align 1
 ; CHECK-NEXT:    store i8 [[TMP2]], ptr [[DEST:%.*]], align 1
-; CHECK-NEXT:    [[CMP:%.*]] = icmp ult i32 [[TMP4]], 0
+; CHECK-NEXT:    [[CMP:%.*]] = icmp ult i8 [[COND_I]], 0
 ; CHECK-NEXT:    br i1 [[CMP]], label [[DO_BODY]], label [[DO_END:%.*]]
 ; CHECK:       do.end:
 ; CHECK-NEXT:    ret void

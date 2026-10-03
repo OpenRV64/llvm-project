@@ -62,7 +62,7 @@ define i64 @load_unscaled_zext_i32_to_i64(i64 %a) {
 
 define i32 @load_unscaled_sext_i8_to_i32(i64 %a) {
 ; CHECK-LABEL: load_unscaled_sext_i8_to_i32
-; CHECK:       ldurb [[REG:w[0-9]+]], [x0, #-8]
+; CHECK:       ldursb [[REG:w[0-9]+]], [x0, #-8]
 ; CHECK:       sxtb w0, [[REG]]
   %1 = sub i64 %a, 8
   %2 = inttoptr i64 %1 to ptr addrspace(256)
@@ -73,7 +73,7 @@ define i32 @load_unscaled_sext_i8_to_i32(i64 %a) {
 
 define i32 @load_unscaled_sext_i16_to_i32(i64 %a) {
 ; CHECK-LABEL: load_unscaled_sext_i16_to_i32
-; CHECK:       ldurh [[REG:w[0-9]+]], [x0, #-8]
+; CHECK:       ldursh [[REG:w[0-9]+]], [x0, #-8]
 ; CHECK:       sxth w0, [[REG]]
   %1 = sub i64 %a, 8
   %2 = inttoptr i64 %1 to ptr addrspace(256)
@@ -84,7 +84,7 @@ define i32 @load_unscaled_sext_i16_to_i32(i64 %a) {
 
 define i64 @load_unscaled_sext_i8_to_i64(i64 %a) {
 ; CHECK-LABEL: load_unscaled_sext_i8_to_i64
-; CHECK:       ldurb [[REG:w[0-9]+]], [x0, #-8]
+; CHECK:       ldursb [[REG:w[0-9]+]], [x0, #-8]
 ; CHECK:       sxtb x0, [[REG]]
   %1 = sub i64 %a, 8
   %2 = inttoptr i64 %1 to ptr addrspace(256)
@@ -95,7 +95,7 @@ define i64 @load_unscaled_sext_i8_to_i64(i64 %a) {
 
 define i64 @load_unscaled_sext_i16_to_i64(i64 %a) {
 ; CHECK-LABEL: load_unscaled_sext_i16_to_i64
-; CHECK:       ldurh [[REG:w[0-9]+]], [x0, #-8]
+; CHECK:       ldursh [[REG:w[0-9]+]], [x0, #-8]
 ; CHECK:       sxth x0, [[REG]]
   %1 = sub i64 %a, 8
   %2 = inttoptr i64 %1 to ptr addrspace(256)
