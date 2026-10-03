@@ -288,8 +288,9 @@ public:
   }
 
   /// ComputePHILiveOutRegInfo - Compute LiveOutInfo for a PHI's destination
-  /// register based on the LiveOutInfo of its operands.
-  LLVM_ABI void ComputePHILiveOutRegInfo(const PHINode *);
+  /// register based on the LiveOutInfo of its operands. When some predecessors
+  /// have not been selected, look through PHI-only cycles to their inputs.
+  LLVM_ABI void ComputePHILiveOutRegInfo(const PHINode *, bool AllPredsVisited);
 
   /// InvalidatePHILiveOutRegInfo - Invalidates a PHI's LiveOutInfo, to be
   /// called when a block is visited before all of its predecessors.
